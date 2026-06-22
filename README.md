@@ -6,19 +6,19 @@ Three scenario types, each with one or more solver implementations:
 
 | Directory | Scenario | Scripts | Solver |
 |---|---|---|---|
-| `windconst/` | Wind-only waste | `Wind-peak-100_045_final_4.py`, `Wind-const-100_045_final4.py` | Gurobi, CPLEX |
-| `windpeak/` | Combined wind + automotive waste | `Wind_peak_car_100_45_final6_Large.py`, `Wind_const_car_100_45_final4.py` | Gurobi, CPLEX |
+| `wind/` | Wind-only waste | `Wind-peak-100_045_final_4.py`, `Wind-const-100_045_final4.py` | Gurobi, CPLEX |
+| `car-wind/` | Combined wind + automotive waste | `Wind_peak_car_100_45_final6_Large.py`, `Wind_const_car_100_45_final4.py` | Gurobi, CPLEX |
 | `car/` | Automotive-only waste | `Car_100_02.py` | CPLEX |
 
 ## Repository structure
 
 ```
 .
-├── windconst/                              # Wind-only waste scenario
+├── wind/                              # Wind-only waste scenario
 │   ├── Wind-peak-100_045_final_4.py        # main optimization + visualization script (Gurobi)
 │   ├── Wind-const-100_045_final4.py        # main optimization + visualization script (CPLEX)
 │   └── visualize_scenarios.py              # regenerate the 4 cumulative maps for an already-solved scenario
-├── windpeak/                                # Combined wind + automotive waste scenario
+├── car-wind/                                # Combined wind + automotive waste scenario
 │   ├── Wind_peak_car_100_45_final6_Large.py # main optimization + visualization script (Gurobi)
 │   ├── Wind_const_car_100_45_final4.py     # main optimization + visualization script (CPLEX)
 │   └── build_kpi_summary.py                # rebuild the KPI summary Excel from a saved solution
@@ -53,7 +53,7 @@ conda install -c conda-forge pandas numpy matplotlib geopandas shapely tqdm osmn
 pip install -r requirements.txt
 ```
 
-### Gurobi (windconst/Wind-peak-100_045_final_4.py, windpeak/Wind_peak_car_100_45_final6_Large.py)
+### Gurobi (wind/Wind-peak-100_045_final_4.py, car-wind/Wind_peak_car_100_45_final6_Large.py)
 
 ```bash
 python -m pip install gurobipy
@@ -72,7 +72,7 @@ export GRB_LICENSE_FILE=/path/to/your/gurobi.lic
 
 See [Gurobi's license documentation](https://www.gurobi.com/documentation/current/quickstart_linux/retrieving_and_setting_up_.html) for obtaining one.
 
-### CPLEX (windconst/Wind-const-100_045_final4.py, windpeak/Wind_const_car_100_45_final4.py, car/Car_100_02.py)
+### CPLEX (wind/Wind-const-100_045_final4.py, car-wind/Wind_const_car_100_45_final4.py, car/Car_100_02.py)
 
 ```bash
 python -m pip install cplex docplex
@@ -89,10 +89,10 @@ All scripts use the Eurostat NUTS-2 region boundaries (`NUTS_RG_20M_2016_3035.sh
 Each script takes the path to one input Excel file as its only required argument:
 
 ```bash
-python windconst/Wind-peak-100_045_final_4.py   inputs/Nur_Wind_Lichtenegger_294.xlsx
-python windconst/Wind-const-100_045_final4.py   inputs/Nur_Wind_Lichtenegger_294.xlsx
-python windpeak/Wind_peak_car_100_45_final6_Large.py  inputs/Kombiniert_Lichtenegger_294.xlsx
-python windpeak/Wind_const_car_100_45_final4.py       inputs/Kombiniert_Lichtenegger_294.xlsx
+python wind/Wind-peak-100_045_final_4.py   inputs/Nur_Wind_Lichtenegger_294.xlsx
+python wind/Wind-const-100_045_final4.py   inputs/Nur_Wind_Lichtenegger_294.xlsx
+python car-wind/Wind_peak_car_100_45_final6_Large.py  inputs/Kombiniert_Lichtenegger_294.xlsx
+python car-wind/Wind_const_car_100_45_final4.py       inputs/Kombiniert_Lichtenegger_294.xlsx
 python car/Car_100_02.py                        inputs/Nur_Auto.xlsx
 ```
 
@@ -105,7 +105,7 @@ Run any script with `-h` to see its usage. Use a path relative to where you laun
 #### Option 1 — nohup (simplest, survives logout)
 
 ```bash
-nohup python windconst/Wind-peak-100_045_final_4.py inputs/Nur_Wind_Lichtenegger_294.xlsx > run.log 2>&1 &
+nohup python wind/Wind-peak-100_045_final_4.py inputs/Nur_Wind_Lichtenegger_294.xlsx > run.log 2>&1 &
 echo "PID: $!"
 ```
 
@@ -131,7 +131,7 @@ kill <PID>
 #### Option 2 — nohup + disown (extra safety)
 
 ```bash
-nohup python windconst/Wind-peak-100_045_final_4.py inputs/Nur_Wind_Lichtenegger_294.xlsx > run.log 2>&1 &
+nohup python wind/Wind-peak-100_045_final_4.py inputs/Nur_Wind_Lichtenegger_294.xlsx > run.log 2>&1 &
 disown
 ```
 
@@ -141,7 +141,7 @@ disown
 
 ```bash
 tmux new -s optimization
-python windconst/Wind-peak-100_045_final_4.py inputs/Nur_Wind_Lichtenegger_294.xlsx
+python wind/Wind-peak-100_045_final_4.py inputs/Nur_Wind_Lichtenegger_294.xlsx
 ```
 
 Detach (keep running): `Ctrl+B`, then `D`
@@ -158,10 +158,10 @@ These options apply to any of the 5 main scripts — substitute the script path 
 Each run creates a folder named after the input `.xlsx` file's stem, next to the *script* (not next to the input file):
 
 ```
-windconst/<xlsx-stem>/
+wind/<xlsx-stem>/
 ├── gurobi_solutions/      # or cplex_solutions/, depending on the script — .sol/.lp files, solution_tidy.csv
 ├── plots/                 # 01-04 cumulative network/hotspot maps (+ yearly flow maps for some scripts)
 └── kpi_summary.xlsx       # per-period and cumulative cost/site KPIs
 ```
 
-For example, running `python windconst/Wind-peak-100_045_final_4.py inputs/Nur_Wind_Lichtenegger_294.xlsx` creates `windconst/Nur_Wind_Lichtenegger_294/`.
+For example, running `python wind/Wind-peak-100_045_final_4.py inputs/Nur_Wind_Lichtenegger_294.xlsx` creates `wind/Nur_Wind_Lichtenegger_294/`.
