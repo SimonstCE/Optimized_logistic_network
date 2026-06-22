@@ -1,6 +1,5 @@
 # requirements.txt for the GFRP-Waste network optimization scripts
-# (Wind-const-100_02/Wind-peak-100_045_final_4.py and
-#  Wind_peak_car_100_45_final6_Large/Wind_peak_car_100_45_final6_Large.py)
+# (windconst/, windpeak/, car/ — see README.md)
 
 pandas>=2.0.0
 numpy>=1.24.0
@@ -12,5 +11,12 @@ geopy>=2.3.0
 osmnx>=1.7.0
 networkx>=3.1
 fiona>=1.9.0          # usually installed automatically with geopandas
-gurobipy==13.0.1              # special package - see installation instructions below
 openpyxl
+
+# Solver packages — see README.md "Setup" for license requirements.
+# Only needed for the scripts that use them:
+#   windconst/Wind-peak-100_045_final_4.py, windpeak/Wind_peak_car_100_45_final6_Large.py
+gurobipy==13.0.1
+#   windconst/Wind-const-100_045_final4.py, windpeak/Wind_const_car_100_45_final4.py, car/Car_100_02.py
+cplex
+docplex

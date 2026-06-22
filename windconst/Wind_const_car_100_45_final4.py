@@ -1,3 +1,42 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Installationen
+
+# In[ ]:
+
+
+# Notebook-Zelle (oder Anaconda Prompt)
+#!conda install -y --override-channels -c conda-forge "osmnx>=2.1"
+
+
+# In[ ]:
+
+
+# in einer Notebook-Zelle oder in der Anaconda Prompt ausführen
+#!conda install -y -c conda-forge fiona
+
+
+# In[ ]:
+
+
+#Import notwendiger Pakete
+#%pip install geopy
+#%pip install geopandas
+#%pip install osmnx
+
+# in einer leeren Notebook-Zelle ausführen (Shell-Aufruf mit "!"):
+#!conda install -y -c conda-forge osmnx pyrosm
+
+
+
+
+
+# # Importe
+
+# In[ ]:
+
+
 import pandas as pd
 from itertools import zip_longest
 import math
@@ -11,28 +50,36 @@ import networkx as nx
 from tqdm.auto import tqdm
 
 
+# In[ ]:
+
 
 import sys
-import gurobipy as gp
-
 print(sys.version)
-print("gurobipy importiert.")
+import cplex, docplex
+print(cplex.__version__, docplex.__version__)
 
 
+# In[ ]:
 
 
-
-import gurobipy as gp
-print("Gurobi Optimizer Version:", ".".join(map(str, gp.gurobi.version())))
-
+import cplex
+print(cplex.Cplex().get_version())
 
 
+# In[ ]:
 
 
 #Einlesen Excel-Datei ---------HIER DIE DATENBASIS ÄNDERN----------------------
-dateipfad = "/home/kit/iw6717/Wind_peak_car_100_45_final6_Large/Kombiniert_Licht_große Kapazität_294.xlsx"
+import argparse
+
+_parser = argparse.ArgumentParser(description="Run the GFRP-Waste network optimization for one input scenario.")
+_parser.add_argument("input_excel", help="Path to the input Excel scenario file (e.g. Kombiniert_Lichtenegger_294.xlsx)")
+_args = _parser.parse_args()
+
+dateipfad = _args.input_excel
 OUTPUT_BASE = Path(__file__).parent / Path(dateipfad).stem
 OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+print(f"Eingabedatei: {dateipfad}")
 print(f"Ausgabeverzeichnis: {OUTPUT_BASE}")
 
 xls = pd.read_excel(
@@ -464,40 +511,6 @@ nuts0["geometry"] = nuts0["geometry"].simplify(tolerance=100)
 print("4. Erstelle Spatial Index für NUTS-0 …")
 nuts0_sindex = nuts0.sindex
 
-# ---------------------------------------------------------------------------
-# LEGACY WORKAROUND (no longer needed after running fix_excel_coordinates.py)
-# Some NUTS IDs in the Excel files (e.g. PT16/PT17/PT18, NL33) had wrong x/y
-# values — Portuguese regions were stored at Romanian coordinates, a Dutch
-# region at Slovak coordinates. The block below overwrote the Excel-based GDFs
-# with authoritative centroids from the NUTS shapefile to paper over those errors.
-# After fix_excel_coordinates.py has been run once on every input .xlsx file,
-# the x/y columns in Excel are correct and the GDFs created above (from Excel)
-# are already accurate — this block is redundant.
-# ---------------------------------------------------------------------------
-# nuts2_4326 = nuts2.to_crs("EPSG:4326")
-# nuts_centroid_map = nuts2_4326.set_index("NUTS_ID").geometry.centroid.to_dict()
-#
-# def _nuts_geom(nuts_id):
-#     return nuts_centroid_map.get(str(nuts_id))
-#
-# supply_gdf = gpd.GeoDataFrame(
-#     supply_df,
-#     geometry=[_nuts_geom(n) for n in supply_df["NUTS_ID"]],
-#     crs="EPSG:4326"
-# ).loc[lambda d: d.geometry.notna()].copy()
-#
-# recycling_gdf = gpd.GeoDataFrame(
-#     recycling_df,
-#     geometry=[_nuts_geom(n) for n in recycling_df["NUTS_ID"]],
-#     crs="EPSG:4326"
-# ).loc[lambda d: d.geometry.notna()].copy()
-#
-# cement_gdf = gpd.GeoDataFrame(
-#     zementwerke_df,
-#     geometry=[_nuts_geom(n) for n in zementwerke_df.index],
-#     crs="EPSG:4326"
-# ).loc[lambda d: d.geometry.notna()].copy()
-
 # 5. ISO-Länderkürzel (Index von nuts0) ausgeben
 print("5. Verfügbare ISO-Länderkürzel (NUTS-0-Index):")
 iso_codes = nuts0.index.tolist()
@@ -664,270 +677,10 @@ cap_z = zementwerke_df['Demand GFK in kg'].to_dict()
 # In[ ]:
 
 
-# Gurobi-Kompatibilitätslayer (ersetzt die im Notebook genutzten Docplex-Grundfunktionen)
-
-import re
-import unicodedata
-from collections.abc import Mapping as ABCMapping
-from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Tuple, Dict
-
-import gurobipy as gp
-from gurobipy import GRB
-
-
-_STATUS_NAMES = {
-    getattr(GRB, "LOADED", -1): "LOADED",
-    getattr(GRB, "OPTIMAL", -1): "OPTIMAL",
-    getattr(GRB, "INFEASIBLE", -1): "INFEASIBLE",
-    getattr(GRB, "INF_OR_UNBD", -1): "INF_OR_UNBD",
-    getattr(GRB, "UNBOUNDED", -1): "UNBOUNDED",
-    getattr(GRB, "CUTOFF", -1): "CUTOFF",
-    getattr(GRB, "ITERATION_LIMIT", -1): "ITERATION_LIMIT",
-    getattr(GRB, "NODE_LIMIT", -1): "NODE_LIMIT",
-    getattr(GRB, "TIME_LIMIT", -1): "TIME_LIMIT",
-    getattr(GRB, "SOLUTION_LIMIT", -1): "SOLUTION_LIMIT",
-    getattr(GRB, "INTERRUPTED", -1): "INTERRUPTED",
-    getattr(GRB, "NUMERIC", -1): "NUMERIC",
-    getattr(GRB, "SUBOPTIMAL", -1): "SUBOPTIMAL",
-    getattr(GRB, "INPROGRESS", -1): "INPROGRESS",
-    getattr(GRB, "USER_OBJ_LIMIT", -1): "USER_OBJ_LIMIT",
-    getattr(GRB, "MEM_LIMIT", -1): "MEM_LIMIT",
-}
-
-
-def _sanitize_ascii_name(name: Optional[str], fallback: str = "item") -> str:
-    if not name:
-        return fallback
-    ascii_name = (
-        unicodedata.normalize("NFKD", str(name))
-        .encode("ascii", "ignore")
-        .decode("ascii")
-    )
-    ascii_name = re.sub(r"[^0-9A-Za-z_\[\]\-\.,:=]+", "_", ascii_name).strip("_")
-    if not ascii_name:
-        ascii_name = fallback
-    return ascii_name[:255]
-
-
-def _map_cplex_lpmethod_to_gurobi(value: Any) -> int:
-    try:
-        v = int(value)
-    except Exception:
-        return -1
-
-    mapping = {
-        0: -1,  # auto
-        1: 0,   # primal simplex
-        2: 1,   # dual simplex
-        3: 1,   # network -> konservativer Fallback
-        4: 2,   # barrier
-        5: 1,   # sifting -> konservativer Fallback
-        6: 3,   # concurrent
-    }
-    return mapping.get(v, -1)
-
-
-def _mb_to_gb(value: Any) -> float:
-    return float(value) / 1000.0
-
-
-def _resolve_addvars_arg(value: Any, key_list, *, cast=None):
-    if value is None:
-        return None
-    if callable(value):
-        out = {k: value(k) for k in key_list}
-    elif isinstance(value, ABCMapping):
-        out = {k: value[k] for k in key_list}
-    else:
-        return cast(value) if cast is not None else value
-
-    if cast is not None:
-        out = {k: cast(v) for k, v in out.items()}
-    return out
-
-
-_PARAM_MAP = {
-    "timelimit": ("TimeLimit", float),
-    "worklimit": ("WorkLimit", float),
-    "threads": ("Threads", int),
-    "parallel": (None, None),
-    "workmem": ("SoftMemLimit", _mb_to_gb),
-    "lpmethod": ("Method", _map_cplex_lpmethod_to_gurobi),
-    "mip.tolerances.mipgap": ("MIPGap", float),
-    "mip.limits.treememory": ("SoftMemLimit", _mb_to_gb),
-    "emphasis.memory": (None, None),
-}
-
-
-class _ParameterNode:
-    def __init__(self, model: gp.Model, ignored: Dict[str, Any], path: Tuple[str, ...] = ()):
-        self._model = model
-        self._ignored = ignored
-        self._path = path
-
-    def __getattr__(self, name: str):
-        return _ParameterNode(self._model, self._ignored, self._path + (name,))
-
-    def set(self, value: Any) -> None:
-        key = ".".join(self._path).lower()
-        mapped = _PARAM_MAP.get(key)
-        if mapped is None:
-            self._ignored[key] = value
-            return
-
-        param_name, converter = mapped
-        if param_name is None:
-            self._ignored[key] = value
-            return
-
-        converted = converter(value) if converter is not None else value
-        self._model.setParam(param_name, converted)
-
-
-@dataclass
-class SolveDetails:
-    status: str
-    status_code: int
-    time: Optional[float] = None
-    mip_relative_gap: Optional[float] = None
-    best_bound: Optional[float] = None
-
-
-class GurobiSolution:
-    def __init__(self, model: gp.Model):
-        self._model = model
-        self.solve_details = SolveDetails(
-            status=_STATUS_NAMES.get(int(model.Status), str(model.Status)),
-            status_code=int(model.Status),
-            time=self._safe_float_attr("Runtime"),
-            mip_relative_gap=self._safe_float_attr("MIPGap"),
-            best_bound=self._safe_float_attr("ObjBound"),
-        )
-
-    def _safe_float_attr(self, attr: str) -> Optional[float]:
-        try:
-            return float(getattr(self._model, attr))
-        except Exception:
-            return None
-
-    @property
-    def objective_value(self) -> float:
-        return float(self._model.ObjVal)
-
-    def get_value_dict(self, flat_mapping: Mapping[Any, gp.Var]) -> Dict[Any, float]:
-        values = {}
-        for key, var in flat_mapping.items():
-            try:
-                values[key] = float(var.X)
-            except Exception:
-                values[key] = 0.0
-        return values
-
-    def __bool__(self) -> bool:
-        try:
-            return int(self._model.SolCount) > 0
-        except Exception:
-            return False
-
-
-class Model:
-    """Kleiner Wrapper mit den im Notebook verwendeten Docplex-Methoden."""
-
-    def __init__(self, name: str = ""):
-        self._model = gp.Model(_sanitize_ascii_name(name or "model", "model"))
-        self._ignored_params = {}
-        self._parameters = _ParameterNode(self._model, self._ignored_params)
-
-    def __getattr__(self, item: str) -> Any:
-        return getattr(self._model, item)
-
-    @property
-    def parameters(self):
-        return self._parameters
-
-    @property
-    def gurobi_model(self) -> gp.Model:
-        return self._model
-
-    @property
-    def number_of_constraints(self) -> int:
-        self._model.update()
-        return int(self._model.NumConstrs)
-
-    def continuous_var_dict(self, keys, name: Optional[str] = None, lb: float = 0.0, ub=None):
-        key_list = list(keys)
-        kwargs = {
-            "lb": _resolve_addvars_arg(lb, key_list, cast=float),
-            "vtype": GRB.CONTINUOUS,
-        }
-        ub_arg = _resolve_addvars_arg(ub, key_list, cast=float)
-        if ub_arg is not None:
-            kwargs["ub"] = ub_arg
-        return self._model.addVars(key_list, **kwargs)
-
-    def binary_var_dict(self, keys, name: Optional[str] = None):
-        key_list = list(keys)
-        return self._model.addVars(key_list, vtype=GRB.BINARY)
-
-    def add_constraint(self, constr, ctname: Optional[str] = None):
-        if ctname:
-            return self._model.addConstr(constr, name=_sanitize_ascii_name(ctname, "ct"))
-        return self._model.addConstr(constr)
-
-    def sum(self, exprs):
-        return gp.quicksum(exprs)
-
-    def linear_expr(self):
-        return gp.LinExpr(0.0)
-
-    def minimize(self, expr) -> None:
-        self._model.setObjective(expr, GRB.MINIMIZE)
-
-    def print_information(self) -> None:
-        self._model.update()
-        print("Gurobi-Modellinformation")
-        print(f"  Modellname            : {self._model.ModelName}")
-        print(f"  Variablen gesamt      : {self._model.NumVars}")
-        print(f"  Binäre Variablen      : {getattr(self._model, 'NumBinVars', 'n/a')}")
-        print(f"  Ganzzahlige Variablen : {getattr(self._model, 'NumIntVars', 'n/a')}")
-        print(f"  Nebenbedingungen      : {self._model.NumConstrs}")
-        if self._ignored_params:
-            print(f"  Ignorierte CPLEX-Parameter: {self._ignored_params}")
-
-    def solve(self, log_output: bool = False):
-        self._model.update()
-        self._model.Params.OutputFlag = 1 if log_output else 0
-        self._model.optimize()
-        if int(self._model.SolCount) > 0:
-            return GurobiSolution(self._model)
-        return None
-
-    def report(self) -> None:
-        status_name = _STATUS_NAMES.get(int(self._model.Status), str(self._model.Status))
-        print(f"Solver-Status: {status_name}")
-        try:
-            print(f"Runtime      : {float(self._model.Runtime):,.2f} s")
-        except Exception:
-            pass
-        if int(self._model.SolCount) > 0:
-            print(f"Objektwert   : {float(self._model.ObjVal):,.6f}")
-            try:
-                print(f"Best Bound   : {float(self._model.ObjBound):,.6f}")
-            except Exception:
-                pass
-            try:
-                print(f"MIP Gap      : {float(self._model.MIPGap):.6%}")
-            except Exception:
-                pass
-
-
-# In[ ]:
-
-
-# Gurobi initialisieren - Modell erzeugen
-mip = Model("Gurobi")
-print("Gurobi-Modell initialisiert.")
+#CPLEX initialisieren - Modell erzeugen
+from docplex.mp.model import Model
+mip = Model("Cplex")
+print("CPLEX-Modell initialisiert.")
 
 
 # In[ ]:
@@ -963,17 +716,18 @@ print(f"Betrachtete Jahre (T): {T}")
 # 1. Daten für Constraints vorbereiten (Spaltennamen anpassen)
 # ------------------------------------------------------------
 # Wir machen aus den Spalten "2025-2029" etc. einfache Jahreszahlen (2025),
-# damit der Zugriff in den Schleifen `for t in T` funktioniert.
+# damit der Zugriff in der Schleife `for t in T` funktioniert.
 
 # supply_df hat Spalten "NUTS_ID", "Industrie" und die Zeiträume
 q_supply_data = supply_df.set_index(["NUTS_ID", "Industrie"])[jahres_cols].copy()
 
 # Umbenennen der Spalten: "2025-2029" -> 2025
-col_to_year = {v: k for k, v in year_map.items()}
+# Wir nutzen das Mapping, das wir am Anfang definiert haben, aber "rückwärts"
+col_to_year = {v: k for k, v in year_map.items()} 
 q_supply_data.rename(columns=col_to_year, inplace=True)
 
-# Fehlende Werte sauber auf 0 setzen
-q_supply_data = q_supply_data.astype(float).fillna(0.0)
+# Fehlende Werte mit 0 füllen
+q_supply_data = q_supply_data.fillna(0.0)
 
 print("✅ Angebotsdaten vorbereitet. Spalten:", q_supply_data.columns.tolist())
 
@@ -983,7 +737,6 @@ print("✅ Angebotsdaten vorbereitet. Spalten:", q_supply_data.columns.tolist())
 
 # ============================================================
 # Entscheidungsvariablen  (inkl. “Eröffnungs-Delta”)
-# Performance-Tuning: enge obere Schranken für schnellere Presolve / LP
 # ============================================================
 
 # --- Menge aller Tupel für kontinuierliche / binäre Variablen -------
@@ -992,51 +745,14 @@ XRZ  = [(r, z, t)    for r in R for z in Z for t in T]              # R → Z
 YRK  = [(r, k, t)    for r in R for k in K for t in T]              # Werk r,k offen?
 BRT  = [(r, t)       for r in R for t in T]                         # Großteile-Linie aktiv?
 SAIGT = [(a, i, g, t) for a in A for i in I for g in G for t in T]
+
+
 XRKT = [(r, k, t) for r in R for k in K for t in T]                 # Hilfsvariable für Linearisierung
-
-# --- Enge obere Schranken -------------------------------------------
-# Im kombinierten Szenario sind nur diese Größen je Industrie zulässig.
-valid_size = {"Wind": "groß", "Auto": "klein"}
-
-def supply_qty(a, industry, t):
-    try:
-        return float(q_supply_data.loc[(a, industry), t])
-    except KeyError:
-        return 0.0
-
-# Verfügbare Angebotsmenge je Standort, Größe und Periode
-supply_size_ub = {}
-for a in A:
-    for t in T:
-        supply_size_ub[(a, "groß",  t)] = supply_qty(a, "Wind", t)
-        supply_size_ub[(a, "klein", t)] = supply_qty(a, "Auto", t)
-
-def ub_x_ar(key):
-    a, r, g, t = key
-    return supply_size_ub[(a, g, t)]
-
-def ub_x_rz(key):
-    r, z, t = key
-    return float(q_demand_z.at[z])
-
-def ub_s_aig(key):
-    a, i, g, t = key
-    if valid_size[i] != g:
-        return 0.0
-    return supply_qty(a, i, t)
-
-def ub_flow_rk(key):
-    r, k, t = key
-    return float(K_r_groß if k == "groß" else K_r_klein)
-
-fixed_x_ar = sum(1 for key in XARG if ub_x_ar(key) == 0.0)
-fixed_s_aig = sum(1 for key in SAIGT if ub_s_aig(key) == 0.0)
-
 # --- ❶ Transport- und Betriebsmengen --------------------------------
-x_ar_g = mip.continuous_var_dict(XARG, name="x_ar_g", lb=0, ub=ub_x_ar)   # [kg]
-x_rz   = mip.continuous_var_dict(XRZ,  name="x_rz",   lb=0, ub=ub_x_rz)   # [kg]
-s_aig  = mip.continuous_var_dict(SAIGT, name="s_aig", lb=0, ub=ub_s_aig)
+x_ar_g = mip.continuous_var_dict(XARG, name="x_ar_g")   # [t]
+x_rz   = mip.continuous_var_dict(XRZ,  name="x_rz")     # [t]
 
+s_aig  = mip.continuous_var_dict(SAIGT,name="s_aig",  lb=0)
 # --- ❷ Binäre Statusvariablen ---------------------------------------
 y_r_k  = mip.binary_var_dict(YRK, name="y_r_k")         # 1↔Werk r mit Kapazität k offen
 b_rt   = mip.binary_var_dict(BRT, name="b_rt")          # 1↔Großteil-Linie aktiv
@@ -1045,12 +761,11 @@ b_rt   = mip.binary_var_dict(BRT, name="b_rt")          # 1↔Großteil-Linie ak
 dy_r_k = mip.binary_var_dict(YRK, name="dy_r_k")        # 1↔Werk r,k wird neu eröffnet
 db_rt  = mip.binary_var_dict(BRT, name="db_rt")         # 1↔Großteil-Linie wird neu installiert
 
-# --- HILFSVARIABLEN zur Linearisierung der variablen Kosten ----------
+# --- HILFSVARIABLEN zur Linearisierung der variablen Kosten ----
 # flow_rk_t: Fluss, der im Jahr t Werk r mit Kapazität k zugerechnet wird
-flow_rk = mip.continuous_var_dict(XRKT, name="flow_rk", lb=0, ub=ub_flow_rk)
+flow_rk = mip.continuous_var_dict(XRKT, name="flow_rk", lb=0) # lb=0 stellt Nicht-Negativität sicher
 
 print("Entscheidungsvariablen inkl. Delta-Variablen angelegt.")
-print(f"✅ Obere Schranken gesetzt: x_ar_g (davon {fixed_x_ar:,} direkt auf 0), s_aig (davon {fixed_s_aig:,} direkt auf 0), x_rz und flow_rk.")
 
 
 # In[ ]:
@@ -1067,9 +782,25 @@ print( any("gross"  in k for k in x_ar_g),
 # In[ ]:
 
 
-# q_supply_data wurde bereits weiter oben vorbereitet.
-# Keine doppelte Neuaufbereitung nötig.
-print("ℹ️ q_supply_data bereits vorbereitet – doppelte Neuaufbereitung übersprungen.")
+# =============================================================================
+# DATEN-VORBEREITUNG FÜR NEBENBEDINGUNGEN (KOMBINIERT)
+# =============================================================================
+
+# 1. Multi-Index erstellen: Wir müssen nach Ort UND Industrie unterscheiden
+#    supply_df enthält jetzt Wind und Auto Daten
+q_supply_data = supply_df.set_index(["NUTS_ID", "Industrie"])[jahres_cols].copy()
+
+# 2. Spaltennamen anpassen (Strings "2025-2029" -> Integers 2025)
+#    Damit die Schleife `for t in T` (wobei t=2025 ist) die Spalte findet.
+col_to_year = {v: k for k, v in year_map.items()} 
+q_supply_data.rename(columns=col_to_year, inplace=True)
+
+# 3. Clean up
+q_supply_data = q_supply_data.astype(float).fillna(0.0)
+
+print("✅ q_supply_data vorbereitet.")
+print("   Index:", q_supply_data.index.names) # Sollte ['NUTS_ID', 'Industrie'] sein
+print("   Spalten:", q_supply_data.columns.tolist()) # Sollte [2025, 2030, ...] sein
 
 
 # In[ ]:
@@ -1079,21 +810,23 @@ print("ℹ️ q_supply_data bereits vorbereitet – doppelte Neuaufbereitung üb
 # SCHRITT 7: NEBENBEDINGUNGEN (KOMBINIERT: WIND + AUTO)
 # =============================================================================
 
-print("Erstelle Haupt-Nebenbedingungen...")
+print("Erstelle Nebenbedingungen...")
 
 # ---------------------------------------------------------------------------
-# 1. ANGEBOTS-BILANZ & INDUSTRIE-LOGIK
+# 1. ANGEBOTS-BILANZ & INDUSTRIE-LOGIK (Der Kern des kombinierten Szenarios)
 # ---------------------------------------------------------------------------
 
 # A) Daten in s_aig laden
 for a in A:
     for i in I:
         for t in T:
+            # Wir holen die Menge aus dem Multi-Index DataFrame
             try:
                 qty = q_supply_data.loc[(a, i), t]
             except KeyError:
-                qty = 0.0
+                qty = 0.0 # Keine Daten für diese Kombi an diesem Ort
 
+            # Die Summe der Größen für eine Industrie muss dem Input entsprechen
             mip.add_constraint(
                 mip.sum(s_aig[a, i, g, t] for g in G) == qty,
                 ctname=f"supply_input_a{a}_i{i}_t{t}"
@@ -1103,28 +836,23 @@ for a in A:
 for a in A:
     for t in T:
         # Wind produziert NUR Großteile -> Kleinteile auf 0 setzen
-        mip.add_constraint(
-            s_aig[a, "Wind", "klein", t] == 0,
-            ctname=f"wind_is_large_a{a}_t{t}"
-        )
+        mip.add_constraint(s_aig[a, "Wind", "klein", t] == 0, ctname=f"wind_is_large_a{a}_t{t}")
 
         # Auto produziert NUR Kleinteile -> Großteile auf 0 setzen
-        mip.add_constraint(
-            s_aig[a, "Auto", "groß", t] == 0,
-            ctname=f"auto_is_small_a{a}_t{t}"
-        )
+        mip.add_constraint(s_aig[a, "Auto", "groß", t] == 0, ctname=f"auto_is_small_a{a}_t{t}")
 
 # C) Link: s_aig (Entstehung) -> x_ar_g (Transport)
 for a in A:
     for g in G:
         for t in T:
+            # Alles was entsteht (Summe über Industrien), muss abtransportiert werden (Summe über Ziele)
             mip.add_constraint(
                 mip.sum(s_aig[a, i, g, t] for i in I) == mip.sum(x_ar_g[a, r, g, t] for r in R),
                 ctname=f"link_s_x_a{a}_g{g}_t{t}"
             )
 
 # ---------------------------------------------------------------------------
-# 2. KAPAZITÄTEN & FLUSS-LOGIK
+# 2. KAPAZITÄTEN & FLUSS-LOGIK (Standard)
 # ---------------------------------------------------------------------------
 
 # Globale Kapazität der Recyclingwerke
@@ -1143,15 +871,21 @@ for r in R:
             ctname=f"one_size_r{r}_t{t}"
         )
 
-# Großteillinie (b_rt) wird benötigt, wenn Großteile ankommen.
-# Keine zusätzliche Kopplung an y_r_k[r, "groß", t]:
-# auch kleine Werke dürfen eine Großteillinie haben.
+# Großteillinie (b_rt) wird benötigt, wenn Großteile ankommen
 for r in R:
     for t in T:
+        # Summe aller Großteile (egal woher) <= Kapazität * b_rt
+        # (Wir nutzen hier die große Kapazität als "Big-M", das reicht)
         mip.add_constraint(
             mip.sum(x_ar_g[a, r, "groß", t] for a in A) <= b_rt[r, t] * K_r_groß,
             ctname=f"bulk_line_needed_r{r}_t{t}"
         )
+
+# NEU: Großteillinie nur in großen Werken (Logische Verknüpfung)
+for r in R:
+    for t in T:
+        mip.add_constraint(b_rt[r, t] <= y_r_k[r, "groß", t], 
+                           ctname=f"bulk_only_in_large_r{r}_t{t}")
 
 # ---------------------------------------------------------------------------
 # 3. MASSENBILANZ (Spuckstoffe) & ZEMENTWERKE
@@ -1166,9 +900,11 @@ for r in R:
         )
 
 # Kapazität Zementwerke
+# Update der Nachfrage-Variable (sicherstellen, dass es eine Series ist)
 q_demand_z = zementwerke_df["Demand GFK in kg"]
 
 for z in Z:
+    # Demand für die Region z holen
     N_z = q_demand_z.at[z]
     for t in T:
         mip.add_constraint(
@@ -1177,29 +913,58 @@ for z in Z:
         )
 
 # ---------------------------------------------------------------------------
-# 4. ZEITLICHE LOGIK (Irreversibilität)
+# 4. ZEITLICHE LOGIK (Irreversibilität & Delta)
 # ---------------------------------------------------------------------------
 
 # Werk bleibt offen (Monotonie)
 for r in R:
     for k in K:
         for t_idx in range(len(T) - 1):
-            t, t_next = T[t_idx], T[t_idx + 1]
-            mip.add_constraint(
-                y_r_k[r, k, t] <= y_r_k[r, k, t_next],
-                ctname=f"monotone_y_r{r}_{k}_{t}"
-            )
+            t, t_next = T[t_idx], T[t_idx+1]
+            mip.add_constraint(y_r_k[r, k, t] <= y_r_k[r, k, t_next], ctname=f"monotone_y_r{r}_{k}_{t}")
 
 # Großteillinie bleibt offen
 for r in R:
     for t_idx in range(len(T) - 1):
-        t, t_next = T[t_idx], T[t_idx + 1]
+        t, t_next = T[t_idx], T[t_idx+1]
+        mip.add_constraint(b_rt[r, t] <= b_rt[r, t_next], ctname=f"monotone_b_r{r}_{t}")
+
+# Delta-Variablen (Investition nur bei Änderung)
+# A) Für y_r_k
+for r in R:
+    for k in K:
+        # Erstes Jahr: Delta = Zustand
+        mip.add_constraint(dy_r_k[r, k, T[0]] == y_r_k[r, k, T[0]])
+        # Folgejahre: Delta >= Zustand(t) - Zustand(t-1)
+        for t_idx in range(1, len(T)):
+            t, t_prev = T[t_idx], T[t_idx-1]
+            mip.add_constraint(dy_r_k[r, k, t] >= y_r_k[r, k, t] - y_r_k[r, k, t_prev])
+
+# B) Für b_rt
+for r in R:
+    mip.add_constraint(db_rt[r, T[0]] == b_rt[r, T[0]])
+    for t_idx in range(1, len(T)):
+        t, t_prev = T[t_idx], T[t_idx-1]
+        mip.add_constraint(db_rt[r, t] >= b_rt[r, t] - b_rt[r, t_prev])
+
+# ---------------------------------------------------------------------------
+# 5. LINEARISIERUNG (flow_rk)
+# ---------------------------------------------------------------------------
+for r in R:
+    for t in T:
+        total_inflow = mip.sum(x_ar_g[a, r, g, t] for a in A for g in G)
+
+        # Split auf flow_variables
         mip.add_constraint(
-            b_rt[r, t] <= b_rt[r, t_next],
-            ctname=f"monotone_b_r{r}_{t}"
+            total_inflow == flow_rk[r, "groß", t] + flow_rk[r, "klein", t],
+            ctname=f"flow_split_r{r}_t{t}"
         )
 
-print("✅ Haupt-Nebenbedingungen erstellt.")
+        # Big-M Constraints (Nur Fluss wenn Werk offen)
+        mip.add_constraint(flow_rk[r, "groß", t] <= K_r_groß * y_r_k[r, "groß", t])
+        mip.add_constraint(flow_rk[r, "klein", t] <= K_r_klein * y_r_k[r, "klein", t])
+
+print("✅ Alle Nebenbedingungen für 'Wind + Auto' erstellt.")
 
 
 # In[ ]:
@@ -1288,13 +1053,13 @@ mip.print_information()
 # In[ ]:
 
 
-import gurobipy as gp
-import sys, inspect
+from docplex.mp.model import Model
+import docplex, sys, inspect, cplex
 
-print("gurobipy-Version     :", ".".join(map(str, gp.gurobi.version())))
-print("gurobipy-Pfad        :", inspect.getfile(gp))
-print("Model ist Wrapper    :", Model.__name__)
-print("Raw model type       :", type(mip.gurobi_model).__name__)
+print("docplex-Version :", docplex.__version__)
+print("docplex-Pfad    :", inspect.getfile(docplex))
+print("cplex-Version   :", cplex.__version__)
+print("Model hat refine_conflict:", hasattr(Model, "refine_conflict"))
 
 
 # # Zielfunktion Kostenminimierung
@@ -1469,115 +1234,44 @@ print("✅ Zielfunktion (Kombiniert: Wind+Auto, Faktor 5, Persyn) gesetzt.")
 
 import os
 from pathlib import Path
-import gurobipy as gp
-from gurobipy import GRB
+import threading
+import time
 
 # ----------------- VORBEREITUNG (AUTOMATISIERT) -----------------
-SOLUTION_DIR = OUTPUT_BASE / "gurobi_solutions"
+SOLUTION_DIR = OUTPUT_BASE / "cplex_solutions"
 os.makedirs(SOLUTION_DIR, exist_ok=True)
 print(f"Lösungen werden in folgendem Verzeichnis gespeichert: {SOLUTION_DIR}")
 
+# Der Dateipfad für die Lösungsspeicherung
 solution_filepath = SOLUTION_DIR / "best_solution_Wind.sol"
-lp_filepath = SOLUTION_DIR / "model_for_gurobi.lp"
 
-# ----------------- MODELL REFERENZIEREN -----------------
-# mip ist hier bereits ein Gurobi-Modell oder ein Wrapper darum
-gmodel = getattr(mip, "_model", mip)
+# ----------------- PARAMETER TUNING (FINALE ROBUSTE STRATEGIE) -----------------
+# Wir arbeiten nur mit dem High-Level-Modell 'mip'
+p = mip.parameters
 
-# Optional: Modell als LP-Datei zu Debug-/Kontrollzwecken schreiben
-# Für produktive Runs standardmäßig AUS, damit kein unnötiger I/O-Overhead entsteht.
-WRITE_LP_DEBUG = False
-if WRITE_LP_DEBUG:
-    gmodel.write(str(lp_filepath))
-    print(f"LP-Modell exportiert nach: {lp_filepath}")
-else:
-    print("LP-Debugexport deaktiviert (spart Startzeit und I/O).")
+# --- 1) Laufzeit-Grenze ---
+# Das CPLEX-Zeitlimit dient nur als Fallback. Unser Thread wird früher zuschlagen.
+#p.timelimit.set(340000) # ca. 96 Stunden
 
-# ----------------- PARAMETER TUNING (GUROBI) -----------------
-THREADS_TARGET = min(16, os.cpu_count() or 16)
-WORK_LIMIT = 340000.0   # deterministisches Work-Budget; Startwert analog zum bisherigen Budget
-SOFT_MEM_LIMIT_GB = 120
-MEM_LIMIT_GB = 180
+# --- 2) MIP Gap Ziel ---
+p.mip.tolerances.mipgap.set(0.0045)
 
-gmodel.Params.MIPGap = 0.0045
-gmodel.Params.WorkLimit = WORK_LIMIT
+# --- 3) RECHENRESSOURCEN & SPEICHER (AGGRESSIV) ---
+#p.threads.set(0)
+#p.parallel.set(1) # Deterministisch, um alle Kerne zu nutzen
+#p.emphasis.memory.set(0)
+#p.workmem.set(60000)
+#p.mip.limits.treememory.set(60000)
 
-gmodel.Params.Threads = THREADS_TARGET
-gmodel.Params.SoftMemLimit = SOFT_MEM_LIMIT_GB
-gmodel.Params.MemLimit = MEM_LIMIT_GB
-
-gmodel.Params.Method = 1
-gmodel.Params.NodeMethod = 1
-gmodel.Params.PreSparsify = 2
-
-print("Aktive Solve-Parameter:")
-print(f"  WorkLimit      = {WORK_LIMIT}")
-print(f"  Threads        = {THREADS_TARGET}")
-print("  MIPGap         = 0.0045")
-print(f"  SoftMemLimit   = {SOFT_MEM_LIMIT_GB} GB")
-print(f"  MemLimit       = {MEM_LIMIT_GB} GB")
-print("  Method         = 1 (Dual Simplex)")
-print("  NodeMethod     = 1 (Dual Simplex)")
-print("  PreSparsify    = 2")
-
-# ----------------- SOLVE -----------------
-print("Starte Gurobi-Lösungsprozess mit WorkLimit...")
-gmodel.optimize()
-
-# ----------------- ERGEBNISSE -----------------
-print(f"Gurobi-Status: {gmodel.Status}")
-
-if gmodel.SolCount > 0:
-    gmodel.write(str(solution_filepath))
-    print(f"Lösung gespeichert unter: {solution_filepath}")
-    print(f"Zielfunktionswert: {gmodel.ObjVal}")
-else:
-    print("Keine zulässige Lösung zum Speichern gefunden.")
+# --- 4) ALGORITHMUS-TUNING ---
+p.lpmethod.set(4) # Barrier-Algorithmus
 
 
-# In[ ]:
+# ----------------- SOLVE (NUR MIT DER HIGH-LEVEL DOCPLEX API) -----------------
+print("Starte CPLEX-Lösungsprozess mit 4-Tage-Timer...")
+solution = mip.solve(log_output=True)
 
-
-import gurobipy as gp
-from gurobipy import GRB
-
-class GurobiSolutionAdapter:
-    def __init__(self, model: gp.Model):
-        self.model = model
-
-    @staticmethod
-    def _accept_value(value: float, keep_zeros: bool, precision: float = 1e-6) -> bool:
-        if not value:
-            return keep_zeros
-        return abs(value) >= precision
-
-    def get_value_dict(self, var_dict, keep_zeros: bool = True, precision: float = 1e-6):
-        """
-        Gurobi-Pendant zu cplex_solution.get_value_dict(var_dict, keep_zeros=True, precision=1e-6)
-
-        Parameter:
-            var_dict: dict oder gp.tupledict mit key -> gurobipy.Var
-            keep_zeros: Nullwerte behalten
-            precision: Schwellwert für kleine Nicht-Null-Werte
-
-        Returns:
-            dict: key -> Lösungswert (float)
-        """
-        if precision < 0:
-            raise ValueError("precision muss >= 0 sein")
-
-        if self.model.SolCount <= 0:
-            raise RuntimeError(
-                "Es ist keine Lösung verfügbar. "
-                "Rufe zuerst model.optimize() auf und prüfe den Modellstatus."
-            )
-
-        value_dict = {}
-        for key, var in var_dict.items():
-            value = var.X
-            if self._accept_value(value, keep_zeros, precision):
-                value_dict[key] = value
-        return value_dict
+mip.report()
 
 
 # In[ ]:
@@ -1588,15 +1282,15 @@ import pandas as pd
 
 def backup_solution_tidy(solution, var_dicts, output_dir, filename="solution_tidy.csv"):
     """
-    Schreibt eine tidy-CSV aller Solution-Variablen.
+    Schreibt eine ‚tidy‘ CSV aller Solution‐Variablen.
 
     Parameters
     ----------
-    solution : GurobiSolution-Objekt
+    solution : CplexSolution‐Objekt
     var_dicts : dict
-        Mapping von Variablen-Namen (z.B. "x_ar_g") auf den zugehörigen dict
+        Mapping von Variablen‐Namen (z.B. "x_ar_g") auf den zugehörigen dict 
         der Entscheidungsvariablen (z.B. x_ar_g[(a,r,g,t)] = var).
-    output_dir : Path-Objekt oder str
+    output_dir : Path‐Objekt oder str
         Verzeichnis, in das die CSV geschrieben wird.
     filename : str
         Name der Ausgabedatei.
@@ -1604,7 +1298,7 @@ def backup_solution_tidy(solution, var_dicts, output_dir, filename="solution_tid
     Returns
     -------
     df_tidy : pandas.DataFrame
-        DataFrame im Tidy-Format.
+        DataFrame im Tidy‐Format.
     """
     # 1) Alle Variablen in ein flaches Mapping nehmen
     flat = {}
@@ -1616,11 +1310,10 @@ def backup_solution_tidy(solution, var_dicts, output_dir, filename="solution_tid
             else:
                 key = (var_name, idx)
             flat[key] = var_ref
-    gurobi_solution = GurobiSolutionAdapter(solution)
 
     # 2) Werte aus der Lösung holen
-    #sol_dict = solution.get_value_dict(flat)
-    sol_dict = gurobi_solution.get_value_dict(flat, keep_zeros=False)
+    sol_dict = solution.get_value_dict(flat)
+
     # 3) In Records umwandeln
     records = []
     for key_tuple, value in sol_dict.items():
@@ -1635,7 +1328,7 @@ def backup_solution_tidy(solution, var_dicts, output_dir, filename="solution_tid
     out_path.mkdir(parents=True, exist_ok=True)
     csv_path = out_path / filename
     df_tidy.to_csv(csv_path, index=False)
-    print(f"→ Tidy-Backup geschrieben nach: {csv_path}")
+    print(f"→ Tidy‐Backup geschrieben nach: {csv_path}")
 
     return df_tidy
 
@@ -1643,15 +1336,16 @@ def backup_solution_tidy(solution, var_dicts, output_dir, filename="solution_tid
 # -------------------------------
 #      Anwendung nach Solve
 # -------------------------------
-if gmodel.ObjVal:
+if solution:
     print("✅ Zulässige Lösung gefunden")
-    print("   Kosten       =", gmodel.ObjVal)
-    print("   Solver-Status:", gmodel.Status)
+    print("   Kosten       =", solution.objective_value)
+    print("   Solver-Status:", solution.solve_details.status)
 
     # Variablendicts bereitstellen
     var_dicts = {
         "x_ar_g": x_ar_g,
         "x_rz": x_rz,
+        "s_aig": s_aig,   # <--- WICHTIG: Wieder da!
         "y_r_k": y_r_k,
         "b_rt": b_rt,
         "dy_r_k": dy_r_k,
@@ -1659,9 +1353,9 @@ if gmodel.ObjVal:
         "flow_rk": flow_rk
     }
 
-    # Tidy-Backup aufrufen
-    SOLUTION_DIR = OUTPUT_BASE / "gurobi_solutions"
-    df_sol_tidy = backup_solution_tidy(gmodel, var_dicts, SOLUTION_DIR)
+    # Tidy‐Backup aufrufen
+    SOLUTION_DIR = OUTPUT_BASE / "cplex_solutions"
+    df_sol_tidy = backup_solution_tidy(solution, var_dicts, SOLUTION_DIR)
 
 else:
     print("⚠️ Keine zulässige Lösung gefunden (infeasible oder Time-Limit).")
@@ -1682,6 +1376,7 @@ df_sol_tidy.head()
 idx_names = {
     "x_ar_g": ["angebot","recycling","größe","periode"],
     "x_rz"  : ["recycling","zementwerk","periode"],
+    "s_aig" : ["angebot", "industrie", "größe", "periode"], # <--- WICHTIG: Wieder da!
     "y_r_k" : ["recycling","kapazität","periode"],
     "b_rt"  : ["recycling","periode"],
     "dy_r_k": ["recycling","kapazität","periode"],
@@ -3335,14 +3030,7 @@ NOTEBOOK_FOLDER_NAME = sanitize_filename(NOTEBOOK_NAME)
 
 requested_export_dir = OUTPUT_BASE / "plots"
 export_dir = requested_export_dir
-
-try:
-    export_dir.mkdir(parents=True, exist_ok=True)
-except Exception as e:
-    export_dir = Path.cwd() / NOTEBOOK_FOLDER_NAME
-    export_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Requested export path could not be created. Fallback export directory used: {export_dir}")
-    print(f"Original error: {e}")
+export_dir.mkdir(parents=True, exist_ok=True)
 
 # ------------------------------------------------------------
 # 5) Prepare polygon data — exact source: polys['sum_all_years']
@@ -3736,7 +3424,7 @@ from matplotlib.colors import LogNorm
 # Tipp: Nehmen Sie hier das Minimum und Maximum aller Ihrer Szenarien.
 # Da es eine Log-Skala ist, darf vmin NICHT 0 sein.
 VMIN_FIXED = 1000       # Untergrenze der Farbskala (z.B. 1 Tonne)
-VMAX_FIXED = 200000000 # Obergrenze der Farbskala (z.B. 500 Mio kg)
+VMAX_FIXED = 20000000 # Obergrenze der Farbskala (z.B. 500 Mio kg)
 
 year = "sum_all_years"
 
@@ -3935,95 +3623,33 @@ print(df_util["util"].describe())
 import geopandas as gpd
 from shapely.geometry import LineString
 import numpy as np
-import pandas as pd
+from matplotlib.colors import LogNorm
 
 proj_crs = polys.crs                     # z. B. EPSG 3035
-FLOW_PLOT_TOL_KG = 1.0                  # nur für die Visualisierung
-
-def _norm_id_series(s):
-    return s.astype(str).str.strip()
-
-def _project_points(df, geom_col, target_crs):
-    return gpd.GeoSeries(df[geom_col], crs=4326).to_crs(target_crs)
-
-def _build_flow_lines(df, start_col, end_col, target_crs, keep_ids):
-    raw = df.copy()
-    raw["value"] = pd.to_numeric(raw["value"], errors="coerce").fillna(0)
-    raw["periode"] = pd.to_numeric(raw["periode"], errors="coerce")
-    raw = raw.loc[raw["value"].abs() > FLOW_PLOT_TOL_KG].copy()
-    raw = raw.dropna(subset=[start_col, end_col])
-
-    start_proj = _project_points(raw, start_col, target_crs)
-    end_proj = _project_points(raw, end_col, target_crs)
-
-    mask = start_proj.notna() & end_proj.notna() & (~start_proj.is_empty) & (~end_proj.is_empty)
-    raw = raw.loc[mask].copy()
-    start_proj = start_proj.loc[mask]
-    end_proj = end_proj.loc[mask]
-
-    for col in keep_ids:
-        if col in raw.columns:
-            raw[col] = _norm_id_series(raw[col])
-
-    raw["_start_point_proj"] = list(start_proj)
-    raw["_end_point_proj"] = list(end_proj)
-    raw["geom_line"] = [LineString([a, b]) for a, b in zip(start_proj, end_proj)]
-
-    return gpd.GeoDataFrame(raw, geometry="geom_line", crs=target_crs)
-
-def _aggregate_routes(gdf, route_cols):
-    if gdf.empty:
-        return gdf.copy()
-
-    tmp = gdf.copy()
-    tmp["value"] = pd.to_numeric(tmp["value"], errors="coerce").fillna(0)
-    tmp["periode"] = pd.to_numeric(tmp["periode"], errors="coerce")
-
-    agg = (
-        tmp.groupby(route_cols + ["periode"], as_index=False)
-           .agg(
-               value=("value", "sum"),
-               geom_line=("geom_line", "first"),
-               _start_point_proj=("_start_point_proj", "first"),
-               _end_point_proj=("_end_point_proj", "first")
-           )
-    )
-    return gpd.GeoDataFrame(agg, geometry="geom_line", crs=gdf.crs)
 
 # 1) Recycling-Werke ins projizierte CRS
-ry_df = dfs_geom_nz["y_r_k"].copy()
-ry_df["value"] = pd.to_numeric(ry_df["value"], errors="coerce").fillna(0)
-ry_df["periode"] = pd.to_numeric(ry_df["periode"], errors="coerce")
-ry_df["recycling"] = _norm_id_series(ry_df["recycling"])
-ry_df = ry_df.loc[ry_df["value"] > 0].copy().to_crs(proj_crs)
+ry_df = dfs_geom_nz["y_r_k"].to_crs(proj_crs)
 
-# 2a) Ströme R -> Z
-flows_gdf = _build_flow_lines(
-    dfs_geom_nz["x_rz"],
-    start_col="geom_recycling",
-    end_col="geom_zement",
-    target_crs=proj_crs,
-    keep_ids=["recycling", "zementwerk"]
+# 2) Ströme: beide Punktspalten separat umprojizieren,
+#    danach gleich LineStrings vorhalten (spart Zeit im Loop)
+flows_raw = dfs_geom_nz["x_rz"].copy()
+
+for col in ["geom_recycling", "geom_zement"]:
+    flows_raw[col] = (
+        gpd.GeoSeries(flows_raw[col], crs=4326)    # ursprüngl. WGS 84
+        .to_crs(proj_crs)
+    )
+
+# LineStrings erzeugen
+flows_raw["geom_line"] = flows_raw.apply(
+    lambda r: LineString([r.geom_recycling, r.geom_zement]), axis=1
 )
-flows_gdf = _aggregate_routes(flows_gdf, ["recycling", "zementwerk"])
 
-# 2b) Ströme A -> R
-flows_ar_gdf = _build_flow_lines(
-    dfs_geom_nz["x_ar_g"],
-    start_col="geom_offer",
-    end_col="geom_recycling",
-    target_crs=proj_crs,
-    keep_ids=["angebot", "recycling", "größe"]
-)
-flows_ar_gdf = _aggregate_routes(flows_ar_gdf, ["angebot", "recycling"])
+# GeoDataFrame mit projizierter Linie
+flows_gdf = gpd.GeoDataFrame(flows_raw, geometry="geom_line", crs=proj_crs)
 
-# 3) Zementwerke sauber mit expliziter ID-Spalte vorbereiten
-cem_gdf = cement_gdf_proj.copy().to_crs(proj_crs)
-cem_gdf["zementwerk"] = cem_gdf.index.astype(str).str.strip()
-
-print(f"✅ Geometrien für A->R und R->Z erfolgreich erstellt (Plot-Toleranz: {FLOW_PLOT_TOL_KG:g} kg).")
-print(f"   A->R Routen > Toleranz: {len(flows_ar_gdf):,}")
-print(f"   R->Z Routen > Toleranz: {len(flows_gdf):,}")
+# 3) Zementwerke sind bereits projiziert (cement_gdf_proj)
+cem_gdf = cement_gdf_proj               # unverändert
 
 
 # In[ ]:
@@ -4033,116 +3659,37 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from shapely.geometry import box
 import numpy as np
-import pandas as pd
-import geopandas as gpd
 
 # ─────────────────────────────────────────
-# 1. Manuelle Skalierung & Ausschluss-Liste
+# 1. Manuelle Skalierung für Vergleichbarkeit
 # ─────────────────────────────────────────
+# Nutzen Sie hier DIESELBEN Werte wie im vorherigen Skript!
 VMIN_FIXED = 1_000       # Untergrenze (z.B. 1 Tonne)
-VMAX_FIXED = 20_000_000  # Obergrenze (z.B. 20 Mio kg)
+VMAX_FIXED = 20_000_000 # Obergrenze (z.B. 500 Mio kg)
 
-FLOW_PLOT_TOL_KG = 1.0   # nur Visualisierung: entfernt numerisches Solver-Rauschen
+print(f"Farbskala fixiert auf: Min={VMIN_FIXED:,.0f}, Max={VMAX_FIXED:,.0f}")
 
 # Jahre und Grenzen
-years = [i for i in range(2026, 2051, 5)]  # 5-Jahres-Schritte
+years = [i for i in range(2026, 2051, 5)] # 5-Jahres-Schritte
 xlim  = (2.5e6, 6.1e6)
 ylim  = (1.3e6, 5.5e6)
 
 # ─────────────────────────────────────────
-# 2. Daten filtern (IDs + Bounding Box)
+# 2. Räumlicher Filter (Bounding Box)
+#    Verhindert Fehler durch Überseegebiete
 # ─────────────────────────────────────────
 visible_bbox = box(xlim[0], ylim[0], xlim[1], ylim[1])
 
-def _detect_offmap_ids(visible_bbox):
-    exclude = set()
+# Wir filtern die GeoDataFrames VOR der Schleife
+# .to_crs() sicherstellen
+ry_df_proj = dfs_geom_nz["y_r_k"].to_crs(polys.crs)
+flows_gdf_proj = flows_gdf.to_crs(polys.crs) 
+cem_gdf_proj = cem_gdf.to_crs(polys.crs)
 
-    def _collect(gdf, id_col):
-        if gdf is None or gdf.empty:
-            return
-
-        tmp = gdf.copy()
-        if tmp.crs != polys.crs:
-            tmp = tmp.to_crs(polys.crs)
-
-        if id_col not in tmp.columns:
-            tmp[id_col] = tmp.index.astype(str)
-
-        mask_visible = (
-            tmp.geometry.notna()
-            & (~tmp.geometry.is_empty)
-            & tmp.geometry.intersects(visible_bbox)
-        )
-        exclude.update(
-            tmp.loc[~mask_visible, id_col]
-               .astype(str)
-               .str.strip()
-               .tolist()
-        )
-
-    _collect(supply_gdf_proj, "NUTS_ID")
-    _collect(recycling_gdf_proj, "NUTS_ID")
-    _collect(cement_gdf_proj, "zementwerk")
-
-    return sorted(i for i in exclude if i)
-
-exclude_ids = _detect_offmap_ids(visible_bbox)
-
-print(f"Farbskala fixiert auf: Min={VMIN_FIXED:,.0f}, Max={VMAX_FIXED:,.0f}")
-print(f"Automatisch erkannte Off-Map-IDs: {exclude_ids}")
-print(f"Plot-Toleranz für Flüsse: {FLOW_PLOT_TOL_KG:g} kg")
-
-def _inside_bbox(geoms, bbox, crs):
-    gs = gpd.GeoSeries(geoms, crs=crs)
-    return gs.notna() & (~gs.is_empty) & gs.intersects(bbox)
-
-# .copy() reicht hier; Daten liegen schon in polys.crs
-ry_df_proj = ry_df.copy()
-flows_gdf_proj = flows_gdf.copy()
-flows_ar_gdf_proj = flows_ar_gdf.copy()
-cem_gdf_proj = cem_gdf.copy()
-
-# IDs explizit normieren
-ry_df_proj["recycling"] = ry_df_proj["recycling"].astype(str).str.strip()
-flows_gdf_proj["recycling"] = flows_gdf_proj["recycling"].astype(str).str.strip()
-flows_gdf_proj["zementwerk"] = flows_gdf_proj["zementwerk"].astype(str).str.strip()
-flows_ar_gdf_proj["angebot"] = flows_ar_gdf_proj["angebot"].astype(str).str.strip()
-flows_ar_gdf_proj["recycling"] = flows_ar_gdf_proj["recycling"].astype(str).str.strip()
-cem_gdf_proj["zementwerk"] = cem_gdf_proj["zementwerk"].astype(str).str.strip()
-
-# Expliziter Ausschluss der problematischen IDs
-ry_df_proj = ry_df_proj.loc[~ry_df_proj["recycling"].isin(exclude_ids)].copy()
-
-flows_gdf_proj = flows_gdf_proj.loc[
-    ~flows_gdf_proj["recycling"].isin(exclude_ids) &
-    ~flows_gdf_proj["zementwerk"].isin(exclude_ids)
-].copy()
-
-flows_ar_gdf_proj = flows_ar_gdf_proj.loc[
-    ~flows_ar_gdf_proj["angebot"].isin(exclude_ids) &
-    ~flows_ar_gdf_proj["recycling"].isin(exclude_ids)
-].copy()
-
-cem_gdf_proj = cem_gdf_proj.loc[
-    ~cem_gdf_proj["zementwerk"].isin(exclude_ids)
-].copy()
-
-# WICHTIGER FIX:
-# Flüsse werden nur gezeigt, wenn beide Endpunkte im sichtbaren Kartenausschnitt liegen.
-# Damit entstehen keine Linien mehr "aus dem Nichts" an Recycling- oder Zementpunkten.
-mask_rz_visible = (
-    _inside_bbox(flows_gdf_proj["_start_point_proj"], visible_bbox, flows_gdf_proj.crs) &
-    _inside_bbox(flows_gdf_proj["_end_point_proj"], visible_bbox, flows_gdf_proj.crs)
-)
-mask_ar_visible = (
-    _inside_bbox(flows_ar_gdf_proj["_start_point_proj"], visible_bbox, flows_ar_gdf_proj.crs) &
-    _inside_bbox(flows_ar_gdf_proj["_end_point_proj"], visible_bbox, flows_ar_gdf_proj.crs)
-)
-
-flows_visible = flows_gdf_proj.loc[mask_rz_visible].copy()
-flows_ar_visible = flows_ar_gdf_proj.loc[mask_ar_visible].copy()
-ry_visible = ry_df_proj.loc[_inside_bbox(ry_df_proj.geometry, visible_bbox, ry_df_proj.crs)].copy()
-cem_visible = cem_gdf_proj.loc[_inside_bbox(cem_gdf_proj.geometry, visible_bbox, cem_gdf_proj.crs)].copy()
+# Filtern auf Sichtbarkeit (Intersects Bounding Box)
+ry_visible = ry_df_proj[ry_df_proj.intersects(visible_bbox)]
+flows_visible = flows_gdf_proj[flows_gdf_proj.intersects(visible_bbox)]
+cem_visible = cem_gdf_proj[cem_gdf_proj.intersects(visible_bbox)]
 
 # ─────────────────────────────────────────
 # 3. Plot-Schleife
@@ -4155,41 +3702,36 @@ for yr in years:
     fig, ax = plt.subplots(figsize=(10, 10), subplot_kw={"aspect": "equal"})
 
     # A) Hintergrundkarte
+    # Null-Werte grau
     polys.loc[polys[col] == 0].plot(
         ax=ax, color="#f0f0f0", edgecolor="white", linewidth=0.2
     )
+    # Positive Werte (FIXE SKALA)
     pos = polys.loc[polys[col] > 0]
     if not pos.empty:
         pos.plot(
             column=col, ax=ax, cmap="YlGnBu",
+            # HIER DIE ÄNDERUNG: Feste Werte nutzen
             norm=LogNorm(vmin=VMIN_FIXED, vmax=VMAX_FIXED),
             legend=False, linewidth=0.2, edgecolor="#d0d0d0"
         )
 
-    # B) Transportflüsse A -> R (Angebot zu Recycling) - ORANGE
-    current_flows_ar = flows_ar_visible.loc[
-        (flows_ar_visible["periode"] == yr) &
-        (pd.to_numeric(flows_ar_visible["value"], errors="coerce").fillna(0).abs() > FLOW_PLOT_TOL_KG)
-    ].copy()
-
-    if not current_flows_ar.empty:
-        w_ar = pd.to_numeric(current_flows_ar["value"], errors="coerce").fillna(0).to_numpy()
-        w_max_ar = w_ar.max() if w_ar.max() > 0 else 1
-        lw_ar = 0.5 + 3.0 * (w_ar / w_max_ar)
-
-        current_flows_ar.plot(
-            ax=ax, linewidth=lw_ar, color="darkorange", alpha=0.6, zorder=1,
-            label="Transport A->R"
+    # B) Recyclingwerke (gefiltert)
+    r_pts = ry_visible.loc[ry_visible["periode"] == yr]
+    if not r_pts.empty:
+        r_pts.plot(
+            ax=ax,
+            markersize=r_pts["kapazität"].map({"klein": 40, "groß": 100}).fillna(40),
+            marker="o", color="#e74c3c", edgecolor="black", linewidth=0.8, zorder=3,
+            label="Recyclingwerk"
         )
 
-    # C) Transportflüsse R -> Z (Recycling zu Zement) - LILA
-    current_flows = flows_visible.loc[
-        (flows_visible["periode"] == yr) &
-        (pd.to_numeric(flows_visible["value"], errors="coerce").fillna(0).abs() > FLOW_PLOT_TOL_KG)
-    ].copy()
+    # C) Transportflüsse (gefiltert)
+    current_flows = flows_visible.loc[flows_visible["periode"] == yr]
 
     if not current_flows.empty:
-        w = pd.to_numeric(current_flows["value"], errors="coerce").fillna(0).to_numpy()
+        # Linienstärke basierend auf Menge
+        w = current_flows["value"].to_numpy()
         w_max = w.max() if w.max() > 0 else 1
         lw = 0.5 + 3.0 * (w / w_max)
 
@@ -4198,41 +3740,21 @@ for yr in years:
             label="Transport R->Z"
         )
 
-    # D) Aktive Zementwerke explizit über ID-Spalte matchen
-    active_z_ids = current_flows["zementwerk"].astype(str).str.strip().unique() if not current_flows.empty else []
-    active_cem = cem_visible.loc[
-        cem_visible["zementwerk"].astype(str).str.strip().isin(active_z_ids)
-    ].copy()
+        # D) Aktive Zementwerke (gefiltert)
+        active_z_ids = current_flows["zementwerk"].unique()
+        active_cem = cem_visible.loc[cem_visible.index.isin(active_z_ids)]
 
-    missing_cem_ids = sorted(set(map(str, active_z_ids)) - set(active_cem["zementwerk"].astype(str)))
-    if missing_cem_ids:
-        print(f"⚠️ Jahr {yr}: aktive Zementwerke ohne sichtbaren Plotpunkt: {missing_cem_ids}")
-
-    if not active_cem.empty:
-        active_cem.plot(
-            ax=ax, marker="^", markersize=60,
-            color="#f1c40f", edgecolor="black", linewidth=0.5, zorder=4,
-            label="Zementwerk"
-        )
-
-    # E) Recyclingwerke
-    r_pts = ry_visible.loc[
-        (ry_visible["periode"] == yr) &
-        (pd.to_numeric(ry_visible["value"], errors="coerce").fillna(0) > 0)
-    ].copy()
-
-    if not r_pts.empty:
-        r_pts.plot(
-            ax=ax,
-            markersize=r_pts["kapazität"].map({"klein": 40, "groß": 100}).fillna(40),
-            marker="o", color="#e74c3c", edgecolor="black", linewidth=0.8, zorder=5,
-            label="Recyclingwerk"
-        )
+        if not active_cem.empty:
+            active_cem.plot(
+                ax=ax, marker="^", markersize=60,
+                color="#f1c40f", edgecolor="black", linewidth=0.5, zorder=4,
+                label="Zementwerk"
+            )
 
     # Layout
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    ax.set_title(f"Jahr {yr}: Stoffströme, Recycling & Zement-Logistik", fontsize=14)
+    ax.set_title(f"Jahr {yr}: Abfallaufkommen, Recycling & Zement-Logistik", fontsize=14)
     ax.axis("off")
 
     plt.tight_layout()
@@ -4335,79 +3857,24 @@ import pandas as pd
 import numpy as np
 
 # 1. Hilfsbelegungen
-dy_df   = dfs_geom_nz.get("dy_r_k", pd.DataFrame())
+dy_df   = dfs_geom_nz.get("dy_r_k", pd.DataFrame()) 
 y_df    = dfs_geom_nz.get("y_r_k", pd.DataFrame())
 db_df   = dfs_geom_nz.get("db_rt", pd.DataFrame())
 b_df    = dfs_geom_nz.get("b_rt", pd.DataFrame())
-ar_df   = flows_ar.copy()
+ar_df   = flows_ar.copy() 
 rz_df   = flows_rz.copy()
 flow_rk = dfs.get("flow_rk", pd.DataFrame())
-if not flow_rk.empty:
-    flow_rk = flow_rk[flow_rk["value"] > 0].copy()
-
-def build_s_df_from_input(q_supply_data, periods):
-    """
-    Robuster Fallback für s_aig:
-    Falls s_aig nicht im Tidy-Backup enthalten ist, kann es direkt aus den
-    fix vorgegebenen Inputmengen rekonstruiert werden. Das ist zulässig, weil
-    die Nebenbedingungen s_aig exakt auf diese Mengen festnageln.
-    """
-    rows = []
-
-    if q_supply_data is None or len(q_supply_data) == 0:
-        return pd.DataFrame(columns=["variable_type", "value", "angebot", "industrie", "größe", "periode"])
-
-    for (angebot, industrie), vals in q_supply_data.iterrows():
-        angebot = str(angebot).strip()
-        industrie = str(industrie).strip()
-
-        if industrie == "Wind":
-            groesse = "groß"
-        elif industrie == "Auto":
-            groesse = "klein"
-        else:
-            # Für unbekannte Industrien wird hier bewusst nichts erzeugt.
-            continue
-
-        for yr in periods:
-            qty = pd.to_numeric(vals.get(yr, 0), errors="coerce")
-            qty = 0.0 if pd.isna(qty) else float(qty)
-
-            if qty > 0:
-                rows.append({
-                    "variable_type": "s_aig",
-                    "value": qty,
-                    "angebot": angebot,
-                    "industrie": industrie,
-                    "größe": groesse,
-                    "periode": int(yr)
-                })
-
-    return pd.DataFrame(rows)
+if not flow_rk.empty: flow_rk = flow_rk[flow_rk["value"] > 0].copy()
 
 # S-Variable (nur für kombiniertes Szenario)
-# Primär aus der Solver-Lösung; falls nicht verfügbar, robust aus q_supply_data ableiten.
 s_df = pd.DataFrame()
-s_source = "solution_backup"
-
-if "s_aig" in dfs and not dfs["s_aig"].empty:
-    s_df = dfs["s_aig"].copy()
-    s_df["value"] = pd.to_numeric(s_df["value"], errors="coerce").fillna(0.0)
-    s_df = s_df.loc[s_df["value"] > 0].copy()
-else:
-    s_df = build_s_df_from_input(q_supply_data, T)
-    s_source = "input_fallback"
-
-if not s_df.empty:
-    s_df["angebot"] = s_df["angebot"].astype(str).str.strip()
-    s_df["industrie"] = s_df["industrie"].astype(str).str.strip()
-    s_df["größe"] = s_df["größe"].astype(str).str.strip()
-    s_df["periode"] = pd.to_numeric(s_df["periode"], errors="coerce").astype(int)
+if "s_aig" in dfs:
+    s_df = dfs["s_aig"][dfs["s_aig"]["value"] > 0].copy()
 
 if not y_df.empty and "iso" not in y_df.columns:
     y_df["iso"] = y_df["recycling"].map(iso_R)
 
-# 2. Standort-KPIs
+# 2. Standort-KPIs (Ihr alter Code, leicht angepasst für leere DFs)
 def calc_site_kpis(year):
     yr = int(year)
     works = y_df.query("periode == @yr")
@@ -4424,30 +3891,29 @@ def calc_site_kpis(year):
         util = inflows.merge(caps, on="recycling", how="left").assign(util=lambda df: df["value"] / df["cap_kg"])
 
     n_gt = 0
-    if not b_df.empty:
-        n_gt = b_df.query("periode == @yr & value > 0")["recycling"].nunique()
+    if not b_df.empty: n_gt = b_df.query("periode == @yr & value > 0")["recycling"].nunique()
 
     return {
-        "Werke_gesamt": works["recycling"].nunique(),
+        "Werke_gesamt": works["recycling"].nunique(), 
         "Werke_klein": works.groupby("kapazität")["recycling"].nunique().get("klein", 0),
-        "Werke_groß": works.groupby("kapazität")["recycling"].nunique().get("groß", 0),
+        "Werke_groß": works.groupby("kapazität")["recycling"].nunique().get("groß", 0), 
         "Werke_GT": n_gt,
-        "Länder_mit_Werk": works["iso"].nunique(),
+        "Länder_mit_Werk": works["iso"].nunique(), 
         "Ø_Auslastung": util["util"].mean() if not util.empty else 0,
         "Median_Auslastung": util["util"].median() if not util.empty else 0,
     }
 
-# 3. Kosten-KPIs
+# 3. Kosten-KPIs (Der entscheidende Teil)
 def calc_cost_kpis(year):
     yr = int(year)
 
     # --- FAKTOREN ---
     period_weight = 5.0  # Konstant 5 Jahre
+
     fact_inv = infl_start[yr]
     fact_run = infl_avg[yr] * period_weight
 
-    def safe_sum(series):
-        return series.sum() if not series.empty else 0.0
+    def safe_sum(series): return series.sum() if not series.empty else 0.0
 
     # DataFrames filtern
     s_y = s_df.query("periode == @yr").copy() if not s_df.empty else pd.DataFrame()
@@ -4459,48 +3925,45 @@ def calc_cost_kpis(year):
     b_y = b_df.query("periode == @yr")
     flow_y = flow_rk.query("periode == @yr") if not flow_rk.empty else pd.DataFrame()
 
-    # --- 1. Transport ---
+    # --- 1. Transport (Einfach) ---
     trans_ar = safe_sum(ar_y["value"] * ar_y["tk_ar"])
     trans_rz = safe_sum(rz_y["value"] * rz_y["tk_rz"])
 
-    # --- 2. Demontage ---
-    demontage = 0.0
+    # --- 2. Demontage (Robust mit Fallback) ---
+    demontage = 0
     if not s_y.empty:
+        s_y['cost_key'] = list(zip(s_y['industrie'], s_y['größe']))
+        # Hier nutzen wir .get() mit Fallback auf DE, wie im funktionierenden Diagnose-Skript
         def get_dem_cost(r):
-            iso = iso_A.get(r["angebot"]) or str(r["angebot"])[:2]
-            costs = cd.get((r["industrie"], r["größe"]), {})
-            dem_cost = costs.get(iso, costs.get("DE", 0))
-            return r["value"] * dem_cost
-
+            iso = iso_A.get(r['angebot']) or r['angebot'][:2]
+            costs = cd.get(r['cost_key'], {})
+            return r['value'] * (costs.get(iso) or costs.get("DE", 0))
         demontage = safe_sum(s_y.apply(get_dem_cost, axis=1))
 
     # --- 3. Entsorgung ---
-    entsorgung = 0.0
+    entsorgung = 0
     if not rz_y.empty:
-        clean_rz = rz_y.drop(columns=["geom_recycling", "geom_zement", "geom_line"], errors="ignore")
-
+        # Hier drop() nutzen, da rz_y Geometrie haben KANN
+        clean_rz = rz_y.drop(columns=['geom_recycling', 'geom_zement', 'geom_line'], errors='ignore')
         def get_ents(r):
-            iso = iso_Z.get(r["zementwerk"]) or "DE"
-            return r["value"] * (czw.get(iso) or czw.get("DE", 0))
-
+            iso = iso_Z.get(r['zementwerk']) or "DE"
+            return r['value'] * (czw.get(iso) or czw.get("DE", 0))
         entsorgung = safe_sum(clean_rz.apply(get_ents, axis=1))
 
-    # --- 4. Werkskosten ---
+    # --- 4. Werkskosten (Explizite Helper-Funktion wie im alten Code, aber mit Fallback) ---
     def calc_fix(df_source, cost_dict, is_gt=False):
-        if df_source.empty:
-            return 0.0
-
-        df_clean = df_source.drop(columns=["geom_recycling"], errors="ignore")
+        if df_source.empty: return 0.0
+        # drop() für Sicherheit
+        df_clean = df_source.drop(columns=['geom_recycling'], errors='ignore')
 
         def get_cost(r):
-            iso = iso_R.get(r["recycling"]) or str(r["recycling"])[:2]
+            iso = iso_R.get(r['recycling']) or r['recycling'][:2]
             if is_gt:
                 val = cost_dict.get(iso) or cost_dict.get("DE", 0)
             else:
-                cap = r["kapazität"]
+                cap = r['kapazität']
                 val = cost_dict.get(cap, {}).get(iso) or cost_dict.get(cap, {}).get("DE", 0)
-            return r["value"] * val
-
+            return r['value'] * val
         return safe_sum(df_clean.apply(get_cost, axis=1))
 
     invest_fix = calc_fix(dy_y, cr_fix)
@@ -4509,21 +3972,21 @@ def calc_cost_kpis(year):
     lauf_gt    = calc_fix(b_y, lkGT, is_gt=True)
 
     # --- 5. Variable Zerkleinerung ---
-    var_cz = 0.0
+    var_cz = 0
     if not flow_y.empty:
         def get_cz(r):
-            iso = iso_R.get(r["recycling"]) or str(r["recycling"])[:2]
-            cap = r["kapazität"]
+            iso = iso_R.get(r['recycling']) or r['recycling'][:2]
+            cap = r['kapazität']
             val = cz.get(cap, {}).get(iso) or cz.get(cap, {}).get("DE", 0)
-            return r["value"] * val
-
+            return r['value'] * val
         var_cz = safe_sum(flow_y.apply(get_cz, axis=1))
 
-    # --- GESAMTKOSTEN ---
-    total = (
-        (demontage + trans_ar + trans_rz + lauf_fix + var_cz + lauf_gt + entsorgung) * fact_run
-        + (invest_fix + invest_gt) * fact_inv
-    )
+    # --- GESAMTKOSTEN (Mit Faktoren!) ---
+    # Alles laufende * fact_run
+    # Alles einmalige * fact_inv
+
+    total = (demontage + trans_ar + trans_rz + lauf_fix + var_cz + lauf_gt + entsorgung) * fact_run + \
+            (invest_fix + invest_gt) * fact_inv
 
     return {
         "Demontage":      demontage * fact_run,
@@ -4545,15 +4008,13 @@ def aggregate_kpis(years):
         row.update(calc_site_kpis(yr))
         row.update(calc_cost_kpis(yr))
         rows.append(row)
-    return pd.DataFrame(rows).set_index("Jahr").sort_index()
+    return (pd.DataFrame(rows).set_index("Jahr").sort_index())
 
 # ============================================================
 # Beispielaufruf
 # ============================================================
-years = range(2026, 2051, 5)
+years = range(2026, 2051, 5) 
 kpi_tbl = aggregate_kpis(years)
-
-print(f"Quelle für Demontage-Berechnung: {s_source}")
 print(kpi_tbl)
 
 
@@ -4564,7 +4025,7 @@ print(kpi_tbl)
 kpi_sum = kpi_tbl["Gesamtkosten"].sum()
 
 # 2. Wert aus dem Solver (Optimierung)
-solver_sum = gmodel.ObjVal
+solver_sum = solution.objective_value
 
 print(f"KPI-Berechnung:  {kpi_sum:,.2f} €")
 print(f"Solver-Lösung:   {solver_sum:,.2f} €")
@@ -4581,8 +4042,6 @@ else:
 # In[ ]:
 
 
-from pathlib import Path
-
 # ------------------------------------------------------------
 # KPI-Tabelle als Excel speichern
 # ------------------------------------------------------------
@@ -4590,6 +4049,18 @@ excel_path = OUTPUT_BASE / "kpi_summary.xlsx"
 kpi_tbl.to_excel(excel_path, sheet_name="KPIs")
 
 print(f"✅  KPI-Datei geschrieben nach: {excel_path}")
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
 
 
 # In[ ]:

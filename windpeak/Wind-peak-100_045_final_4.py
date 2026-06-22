@@ -47,9 +47,16 @@ print("gurobipy", ".".join(map(str, gp.gurobi.version())))
 print("Gurobi Optimizer Version:", ".".join(map(str, gp.gurobi.version())))
 
 # Einlesen Excel-Datei
-dateipfad = "./Nur_Wind_Lichte_extragroße Kapazität_294.xlsx"
+import argparse
+
+_parser = argparse.ArgumentParser(description="Run the GFRP-Waste network optimization for one input scenario.")
+_parser.add_argument("input_excel", help="Path to the input Excel scenario file (e.g. Nur_Wind_Lichtenegger_294.xlsx)")
+_args = _parser.parse_args()
+
+dateipfad = _args.input_excel
 OUTPUT_BASE = Path(__file__).parent / Path(dateipfad).stem
 OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+print(f"Eingabedatei: {dateipfad}")
 print(f"Ausgabeverzeichnis: {OUTPUT_BASE}")
 
 # ============================================================
